@@ -5,6 +5,8 @@ export interface AnalyzerConfig {
   name: string;
   weight: string;
   config: Record<string, unknown>;
+  /** Timeframe for this analyzer. Default '5m'. */
+  timeframe?: string;
 }
 
 export interface MoneyManagementConfig {

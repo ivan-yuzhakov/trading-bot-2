@@ -3,7 +3,8 @@ import { Mutex } from 'async-mutex';
 import type { App } from '../app/App.js';
 import type { ExchangeAdapter } from '../exchange/ExchangeAdapter.js';
 import type { CandleManager } from '../candles/CandleManager.js';
-import type { Candle, Timeframe } from '../candles/types.js';
+import type { Candle } from '../candles/types.js';
+import type { Timeframe } from '../candles/types.js';
 import { Analyzer } from '../analyzers/Analyzer.js';
 import { RsiAnalyzer } from '../analyzers/RsiAnalyzer.js';
 import { BollingerAnalyzer } from '../analyzers/BollingerAnalyzer.js';
@@ -25,7 +26,7 @@ export class PairRunner {
   #exchange: ExchangeAdapter;
   #candleManager: CandleManager;
   #strategy: Strategy;
-  #analyzers: WeightedAnalyzer[] = [];
+  #analyzers: (WeightedAnalyzer & { timeframe: Timeframe })[] = [];
   #signalAggregator: SignalAggregator;
   #moneyManager: MoneyManager;
   #mutex = new Mutex();
@@ -51,7 +52,7 @@ export class PairRunner {
     for (const ac of this.#strategy.analyzers) {
       const analyzer = this.#createAnalyzer(ac);
       if (analyzer) {
-        this.#analyzers.push({ analyzer, weight: ac.weight });
+        this.#analyzers.push({ analyzer, weight: ac.weight, timeframe: (ac.timeframe || '5m') as Timeframe });
 
         // Start NewsAnalyzer background job
         if (analyzer instanceof NewsAnalyzer) {
@@ -157,14 +158,25 @@ export class PairRunner {
     if (!this.#running) return;
 
     await this.#mutex.runExclusive(async () => {
-      // Get candles for analysis
-      const candles = await this.#candleManager.getCandles(this.#exchange.name, this.#strategy.pair, '5m', 200);
-      if (candles.length < 50) return; // Not enough data
+      // Get base candles for current price
+      const baseCandles = await this.#candleManager.getCandles(this.#exchange.name, this.#strategy.pair, '5m', 200);
+      if (baseCandles.length < 50) return;
 
-      const currentPrice = candles[candles.length - 1].c;
+      const currentPrice = baseCandles[baseCandles.length - 1].c;
+
+      // Fetch candles per analyzer timeframe
+      const analyzersWithCandles: WeightedAnalyzer[] = [];
+      for (const a of this.#analyzers) {
+        if (a.timeframe === '5m') {
+          analyzersWithCandles.push({ ...a, candles: baseCandles });
+        } else {
+          const tfCandles = await this.#candleManager.getCandles(this.#exchange.name, this.#strategy.pair, a.timeframe, 200);
+          analyzersWithCandles.push({ ...a, candles: tfCandles });
+        }
+      }
 
       // Run signal aggregation
-      const result = this.#signalAggregator.aggregate(this.#analyzers, candles, currentPrice, this.#activeTrade || undefined);
+      const result = this.#signalAggregator.aggregate(analyzersWithCandles, baseCandles, currentPrice, this.#activeTrade || undefined);
 
       const buyThreshold = new Decimal(this.#strategy.buy_threshold);
       const sellThreshold = new Decimal(this.#strategy.sell_threshold);

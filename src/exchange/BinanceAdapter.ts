@@ -51,9 +51,9 @@ export class BinanceAdapter extends ExchangeAdapter {
     super(app, 'binance');
 
     const demo = app.config.binance.demo;
-    this.#baseUrl = demo ? 'https://testnet.binance.vision' : 'https://api.binance.com';
-    this.#wsApiUrl = demo ? 'wss://testnet.binance.vision/ws-api/v3' : 'wss://ws-api.binance.com:443/ws-api/v3';
-    this.#streamUrl = demo ? 'wss://testnet.binance.vision/ws' : 'wss://stream.binance.com:9443/ws';
+    this.#baseUrl = demo ? 'https://demo-api.binance.com' : 'https://api.binance.com';
+    this.#wsApiUrl = demo ? 'wss://demo-ws-api.binance.com/ws-api/v3' : 'wss://ws-api.binance.com:443/ws-api/v3';
+    this.#streamUrl = demo ? 'wss://demo-stream.binance.com:9443/ws' : 'wss://stream.binance.com:9443/ws';
 
     this.#rest = axios.create({
       baseURL: this.#baseUrl,
@@ -279,6 +279,7 @@ export class BinanceAdapter extends ExchangeAdapter {
 
   async connectUserStream(callback: OrderUpdateCallback): Promise<void> {
     this.#orderUpdateCallback = callback;
+
     this.events.on('executionReport', (event: any) => {
       const order: ExchangeOrder = {
         orderId: String(event.i),

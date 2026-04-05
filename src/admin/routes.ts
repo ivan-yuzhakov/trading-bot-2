@@ -241,6 +241,9 @@ export function registerAdminRoutes(server: Express, app: App): void {
   // ==================== API: Backtest ====================
 
   router.post('/api/backtest', authJson, async (req: any, res) => {
+    // Long operation — disable timeout
+    req.setTimeout(0);
+    res.setTimeout(0);
     try {
       const engine = new BacktestEngine(app);
       const result = await engine.run({

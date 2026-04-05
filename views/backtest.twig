@@ -3,26 +3,29 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Trading Bot v2 - Backtest</title>
+  <title>Backtest</title>
   <link rel="stylesheet" href="/public/css/common.css?v={{ version }}">
-  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
   <script src="https://unpkg.com/lightweight-charts@4/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="/public/js/i18n.js?v={{ version }}"></script>
+  <script src="/public/js/backtest.js?v={{ version }}"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
 </head>
 <body>
-<div class="admin-container" x-data="backtest()" x-init="init()">
+<div class="admin-container" x-data="backtestPage" x-init="init()">
   <header class="header">
-    <h1>Trading Bot v2</h1>
+    <h1>Trading Bot</h1>
     <nav class="nav">
-      <a href="/admin" class="nav-link">Dashboard</a>
-      <a href="/backtest" class="nav-link active">Backtest</a>
+      <a href="/" class="nav-link" x-text="t('dashboard')"></a>
+      <a href="/backtest" class="nav-link active" x-text="t('backtest')"></a>
+      <button class="btn btn-sm lang-toggle" @click="toggleLang()" x-text="lang === 'en' ? 'RU' : 'EN'"></button>
     </nav>
   </header>
 
   <section class="section">
-    <h2>Backtest Configuration</h2>
+    <h2 x-text="t('configuration')"></h2>
     <div class="form-container">
       <div class="form-row">
-        <label>Strategy:</label>
+        <label x-text="t('strategy') + ':'"></label>
         <select x-model="config.strategyId">
           <template x-for="s in strategies" :key="s.id">
             <option :value="s.id" x-text="s.pair + ' - ' + s.exchange"></option>
@@ -30,50 +33,56 @@
         </select>
       </div>
       <div class="form-row">
-        <label>Start Date:</label>
+        <label x-text="t('startDate') + ':'"></label>
         <input type="date" x-model="config.startDate">
       </div>
       <div class="form-row">
-        <label>End Date:</label>
+        <label x-text="t('endDate') + ':'"></label>
         <input type="date" x-model="config.endDate">
       </div>
       <div class="form-row">
-        <label>Initial Balance (USDT):</label>
+        <label x-text="t('initialBalance') + ':'"></label>
         <input type="text" x-model="config.initialBalance" placeholder="10000">
       </div>
       <button class="btn btn-primary" @click="runBacktest()" :disabled="running">
-        <span x-text="running ? 'Running...' : 'Run Backtest'"></span>
+        <span x-show="!running" x-text="t('runBacktest')"></span>
+        <span x-show="running" class="spinner-inline"></span>
       </button>
+      <div x-show="running" class="progress-bar mt-10">
+        <div class="progress-fill" :style="'width:' + progress + '%'"></div>
+        <span class="progress-text" x-text="statusText"></span>
+      </div>
     </div>
   </section>
 
-  <!-- Results -->
-  <section class="section" x-show="result">
-    <h2>Results</h2>
+  <!-- Chart shows during and after backtest -->
+  <section class="section" x-show="running || result !== null">
+    <div id="chart-container" class="chart-container"></div>
+  </section>
+
+  <!-- Results after completion -->
+  <section class="section" x-show="result !== null">
+    <h2 x-text="t('results')"></h2>
     <div class="cards">
       <div class="card">
-        <div class="card-title">Total Profit</div>
-        <div class="card-value" x-text="result?.totalProfit || '0'"></div>
+        <div class="card-title" x-text="t('totalProfit')"></div>
+        <div class="card-value" :class="parseFloat(result?.totalProfit) >= 0 ? 'val-profit' : 'val-loss'" x-text="result?.totalProfit || '0'"></div>
       </div>
       <div class="card">
-        <div class="card-title">Win Rate</div>
+        <div class="card-title" x-text="t('winRate')"></div>
         <div class="card-value" x-text="(result?.winRate || 0) + '%'"></div>
       </div>
       <div class="card">
-        <div class="card-title">Max Drawdown</div>
-        <div class="card-value" x-text="(result?.maxDrawdown || 0) + '%'"></div>
+        <div class="card-title" x-text="t('maxDrawdown')"></div>
+        <div class="card-value val-loss" x-text="(result?.maxDrawdown || 0) + '%'"></div>
       </div>
       <div class="card">
-        <div class="card-title">Trades</div>
-        <div class="card-value" x-text="result?.trades?.length || 0"></div>
+        <div class="card-title" x-text="t('trades')"></div>
+        <div class="card-value" x-text="result?.totalTrades || 0"></div>
       </div>
     </div>
-
-    <!-- Chart -->
-    <div id="chart-container" class="chart-container mt-10"></div>
   </section>
 </div>
 
-<script src="/public/js/backtest.js?v={{ version }}"></script>
 </body>
 </html>

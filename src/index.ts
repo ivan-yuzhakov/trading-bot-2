@@ -5,8 +5,10 @@ dotenv.config();
 import express from 'express';
 import session from 'express-session';
 import MySQLStoreFactory from 'express-mysql-session';
+import { WebSocketServer } from 'ws';
 import { App } from './app/App.js';
 import { registerAdminRoutes } from './admin/routes.js';
+import { BacktestEngine } from './backtesting/BacktestEngine.js';
 
 const MySQLStore = MySQLStoreFactory(session as any);
 
@@ -80,6 +82,28 @@ server.all('/{*path}', (_req, res) => {
 
   const httpServer = server.listen(app.config.port, () => {
     app.logger.log(`Server starts http://127.0.0.1:${app.config.port}`, app.config.mode === 'prod');
+  });
+
+  // WebSocket server for backtest streaming
+  const wss = new WebSocketServer({ server: httpServer, path: '/ws/backtest' });
+  wss.on('connection', (ws) => {
+    ws.on('message', async (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === 'run') {
+          const engine = new BacktestEngine(app);
+          await engine.runStreaming(msg.config, (event) => {
+            if (ws.readyState === ws.OPEN) {
+              ws.send(JSON.stringify(event));
+            }
+          });
+        }
+      } catch (e: any) {
+        if (ws.readyState === ws.OPEN) {
+          ws.send(JSON.stringify({ type: 'error', message: e.message }));
+        }
+      }
+    });
   });
 
   // Graceful shutdown
