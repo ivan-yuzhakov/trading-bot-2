@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trading Bot v2 - Dashboard</title>
+  <link rel="stylesheet" href="/public/css/common.css?v={{ version }}">
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+</head>
+<body>
+<div id="app" class="admin-container" x-data="dashboard()" x-init="init()">
+  <header class="header">
+    <h1>Trading Bot v2</h1>
+    <nav class="nav">
+      <a href="/admin" class="nav-link active">Dashboard</a>
+      <a href="/backtest" class="nav-link">Backtest</a>
+    </nav>
+  </header>
+
+  <!-- Connectivity & Balance -->
+  <section class="section">
+    <h2>Exchanges</h2>
+    <div class="cards">
+      <template x-for="ex in ['binance']" :key="ex">
+        <div class="card">
+          <div class="card-title" x-text="ex.toUpperCase()"></div>
+          <div class="card-row">
+            <span>Status:</span>
+            <span :class="connectivity[ex] ? 'status-ok' : 'status-err'" x-text="connectivity[ex] ? 'Connected' : 'Disconnected'"></span>
+          </div>
+          <button class="btn btn-sm" @click="checkConnectivity(ex)">Check</button>
+          <button class="btn btn-sm" @click="loadBalance(ex)">Balance</button>
+          <div x-show="balances[ex]" class="mt-10">
+            <template x-for="b in (balances[ex] || [])" :key="b.asset">
+              <div class="card-row">
+                <span x-text="b.asset"></span>
+                <span x-text="'Free: ' + b.free + ' | Locked: ' + b.locked"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+    </div>
+  </section>
+
+  <!-- Strategies -->
+  <section class="section">
+    <h2>Strategies</h2>
+    <button class="btn" @click="showStrategyForm = !showStrategyForm">+ New Strategy</button>
+
+    <!-- Strategy form -->
+    <div x-show="showStrategyForm" class="form-container mt-10">
+      <div class="form-row">
+        <label>Pair:</label>
+        <input type="text" x-model="newStrategy.pair" placeholder="BTCUSDT">
+      </div>
+      <div class="form-row">
+        <label>Exchange:</label>
+        <select x-model="newStrategy.exchange">
+          <option value="binance">Binance</option>
+          <option value="bybit">Bybit</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Buy Threshold:</label>
+        <input type="text" x-model="newStrategy.buy_threshold" placeholder="0.5">
+      </div>
+      <div class="form-row">
+        <label>Sell Threshold:</label>
+        <input type="text" x-model="newStrategy.sell_threshold" placeholder="0.5">
+      </div>
+      <div class="form-row">
+        <label>Stop Loss %:</label>
+        <input type="text" x-model="newStrategy.stop_loss_pct" placeholder="2.0 (optional)">
+      </div>
+      <div class="form-row">
+        <label>MM Mode:</label>
+        <select x-model="newStrategy.money_management.mode">
+          <option value="fixed">Fixed</option>
+          <option value="percentage">Percentage</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>MM Amount:</label>
+        <input type="text" x-model="newStrategy.money_management.amount" placeholder="100">
+      </div>
+      <div class="form-row">
+        <label>Max Concurrent:</label>
+        <input type="number" x-model="newStrategy.money_management.maxConcurrentTrades" placeholder="3">
+      </div>
+      <div class="form-row">
+        <label>Daily Loss Limit:</label>
+        <input type="text" x-model="newStrategy.money_management.dailyLossLimit" placeholder="50">
+      </div>
+
+      <!-- Analyzers -->
+      <h3 class="mt-10">Analyzers</h3>
+      <template x-for="(a, idx) in newStrategy.analyzers" :key="idx">
+        <div class="analyzer-row">
+          <select x-model="a.name">
+            <option value="rsi">RSI</option>
+            <option value="bollinger">Bollinger</option>
+            <option value="ma_cross">MA Cross</option>
+            <option value="macd">MACD</option>
+            <option value="volume">Volume</option>
+            <option value="profit_target">Profit Target</option>
+            <option value="stop_loss">Stop Loss</option>
+            <option value="news">News AI</option>
+          </select>
+          <input type="text" x-model="a.weight" placeholder="Weight" style="width:60px">
+          <input type="text" x-model="a.configStr" placeholder='Config JSON: {"period":14}' style="flex:1">
+          <button class="btn btn-sm btn-danger" @click="newStrategy.analyzers.splice(idx, 1)">×</button>
+        </div>
+      </template>
+      <button class="btn btn-sm mt-5" @click="newStrategy.analyzers.push({name:'rsi',weight:'1',configStr:'{\"period\":14}'})">+ Analyzer</button>
+
+      <div class="mt-10">
+        <button class="btn btn-primary" @click="saveStrategy()">Save</button>
+        <button class="btn" @click="showStrategyForm = false">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Strategy list -->
+    <div class="strategy-list mt-10">
+      <template x-for="s in strategies" :key="s.id">
+        <div class="card" :class="{'card-active': s.isRunning}">
+          <div class="card-header">
+            <span class="card-title" x-text="s.pair + ' (' + s.exchange + ')'"></span>
+            <span class="badge" :class="s.isRunning ? 'badge-green' : 'badge-gray'" x-text="s.isRunning ? 'Running' : 'Stopped'"></span>
+          </div>
+          <div class="card-row">
+            <span>Buy/Sell threshold:</span>
+            <span x-text="s.buy_threshold + ' / ' + s.sell_threshold"></span>
+          </div>
+          <div x-show="s.stop_loss_pct" class="card-row">
+            <span>Stop Loss:</span>
+            <span x-text="s.stop_loss_pct + '%'"></span>
+          </div>
+          <div x-show="s.activeTrade" class="card-row">
+            <span>Active Trade:</span>
+            <span x-text="s.activeTrade ? 'Entry: ' + s.activeTrade.entryPrice + ' | Qty: ' + s.activeTrade.quantity : '-'"></span>
+          </div>
+          <div class="card-row">
+            <span>Analyzers:</span>
+            <span x-text="s.analyzers.map(a => a.name + '(' + a.weight + ')').join(', ')"></span>
+          </div>
+          <div class="card-actions">
+            <button class="btn btn-sm" :class="s.active ? 'btn-danger' : 'btn-primary'" @click="toggleStrategy(s.id, s.active)">
+              <span x-text="s.active ? 'Stop' : 'Start'"></span>
+            </button>
+            <button class="btn btn-sm" @click="editStrategy(s)">Edit</button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </section>
+
+  <!-- Recent Trades -->
+  <section class="section">
+    <h2>Recent Trades</h2>
+    <table class="table" x-show="trades.length > 0">
+      <thead>
+        <tr><th>ID</th><th>Pair</th><th>Status</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Profit</th><th>Profit %</th><th>Date</th></tr>
+      </thead>
+      <tbody>
+        <template x-for="t in trades" :key="t.id">
+          <tr :class="{'row-profit': t.profit > 0, 'row-loss': t.profit < 0}">
+            <td x-text="t.id"></td>
+            <td x-text="t.pair"></td>
+            <td x-text="t.status"></td>
+            <td x-text="t.entry_price || '-'"></td>
+            <td x-text="t.exit_price || '-'"></td>
+            <td x-text="t.quantity"></td>
+            <td x-text="t.profit || '-'"></td>
+            <td x-text="t.profit_pct ? t.profit_pct + '%' : '-'"></td>
+            <td x-text="t.created_at"></td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    <p x-show="trades.length === 0" class="muted">No trades yet</p>
+  </section>
+
+  <!-- Statistics -->
+  <section class="section">
+    <h2>Statistics</h2>
+    <div class="cards" x-show="stats">
+      <div class="card">
+        <div class="card-title">Total Profit</div>
+        <div class="card-value" x-text="stats.totalProfit || '0'"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Total Trades</div>
+        <div class="card-value" x-text="stats.totalTrades || 0"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Win Rate</div>
+        <div class="card-value" x-text="(stats.winRate || 0) + '%'"></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script src="/public/js/admin.js?v={{ version }}"></script>
+</body>
+</html>

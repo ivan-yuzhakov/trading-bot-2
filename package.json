@@ -1,0 +1,35 @@
+{
+  "name": "trading-bot-2",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "async-mutex": "^0.5",
+    "axios": "^1.12",
+    "decimal.js": "^10.6",
+    "dotenv": "^17.4.0",
+    "express": "^5.1",
+    "express-session": "^1.18",
+    "express-mysql-session": "^3.0",
+    "ioredis": "^5.6",
+    "mysql2": "^3.15",
+    "reflect-metadata": "^0.2",
+    "twig": "^3.0.0",
+    "typeorm": "^0.3",
+    "ws": "^8.18"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0",
+    "@types/express-session": "^1.18",
+    "@types/node": "^24.12.2",
+    "@types/twig": "^1.12",
+    "@types/ws": "^8.18",
+    "tsx": "^4.19",
+    "typescript": "^6.0.2"
+  }
+}

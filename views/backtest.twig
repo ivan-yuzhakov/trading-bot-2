@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trading Bot v2 - Backtest</title>
+  <link rel="stylesheet" href="/public/css/common.css?v={{ version }}">
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+  <script src="https://unpkg.com/lightweight-charts@4/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<div class="admin-container" x-data="backtest()" x-init="init()">
+  <header class="header">
+    <h1>Trading Bot v2</h1>
+    <nav class="nav">
+      <a href="/admin" class="nav-link">Dashboard</a>
+      <a href="/backtest" class="nav-link active">Backtest</a>
+    </nav>
+  </header>
+
+  <section class="section">
+    <h2>Backtest Configuration</h2>
+    <div class="form-container">
+      <div class="form-row">
+        <label>Strategy:</label>
+        <select x-model="config.strategyId">
+          <template x-for="s in strategies" :key="s.id">
+            <option :value="s.id" x-text="s.pair + ' - ' + s.exchange"></option>
+          </template>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Start Date:</label>
+        <input type="date" x-model="config.startDate">
+      </div>
+      <div class="form-row">
+        <label>End Date:</label>
+        <input type="date" x-model="config.endDate">
+      </div>
+      <div class="form-row">
+        <label>Initial Balance (USDT):</label>
+        <input type="text" x-model="config.initialBalance" placeholder="10000">
+      </div>
+      <button class="btn btn-primary" @click="runBacktest()" :disabled="running">
+        <span x-text="running ? 'Running...' : 'Run Backtest'"></span>
+      </button>
+    </div>
+  </section>
+
+  <!-- Results -->
+  <section class="section" x-show="result">
+    <h2>Results</h2>
+    <div class="cards">
+      <div class="card">
+        <div class="card-title">Total Profit</div>
+        <div class="card-value" x-text="result?.totalProfit || '0'"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Win Rate</div>
+        <div class="card-value" x-text="(result?.winRate || 0) + '%'"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Max Drawdown</div>
+        <div class="card-value" x-text="(result?.maxDrawdown || 0) + '%'"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Trades</div>
+        <div class="card-value" x-text="result?.trades?.length || 0"></div>
+      </div>
+    </div>
+
+    <!-- Chart -->
+    <div id="chart-container" class="chart-container mt-10"></div>
+  </section>
+</div>
+
+<script src="/public/js/backtest.js?v={{ version }}"></script>
+</body>
+</html>
