@@ -1,0 +1,48 @@
+{
+  "name": "RSI 5m Scalping (PT 1-5%, SL 1%)",
+  "backtest": {
+    "startDate": "2026-01-01",
+    "endDate": "2026-03-31",
+    "initialBalance": "10000"
+  },
+  "strategy": {
+    "pair": "ETHUSDT",
+    "exchange": "binance",
+    "analyzers": [
+      {
+        "name": "rsi",
+        "timeframe": "5m",
+        "weight": "1.0",
+        "config": {
+          "period": { "from": 2, "to": 24, "step": 1 },
+          "oversold": { "from": 20, "to": 35, "step": 5 },
+          "overbought": 70
+        }
+      },
+      {
+        "name": "profit_target",
+        "weight": "5.0",
+        "config": {
+          "targetPct": { "from": 1, "to": 10, "step": 1 }
+        }
+      },
+      {
+        "name": "stop_loss",
+        "weight": "5.0",
+        "config": {
+          "lossPct": 1
+        }
+      }
+    ],
+    "buy_threshold": { "from": 0.05, "to": 0.2, "step": 0.05 },
+    "sell_threshold": "0.5",
+    "stop_loss_pct": null,
+    "money_management": {
+      "mode": "percentage",
+      "amount": "95",
+      "maxConcurrentTrades": 1,
+      "maxExposurePerPair": "10000",
+      "dailyLossLimit": "0"
+    }
+  }
+}

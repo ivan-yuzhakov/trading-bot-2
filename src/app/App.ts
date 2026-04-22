@@ -30,7 +30,8 @@ export class App {
 
   async shutdown(): Promise<void> {
     await this.tradeManager.shutdown();
+    await this.logger.close();
     await this.db.destroy();
-    this.redis.client.disconnect();
+    await this.redis.client.quit();
   }
 }

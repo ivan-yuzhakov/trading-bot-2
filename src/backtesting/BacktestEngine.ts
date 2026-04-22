@@ -1,37 +1,29 @@
 import { Decimal } from 'decimal.js';
 import type { App } from '../app/App.js';
-import type { BacktestConfig, BacktestResult, BacktestTrade } from './types.js';
-import type { Timeframe } from '../candles/types.js';
-import { CandleAggregator } from '../candles/CandleAggregator.js';
-import type { WeightedAnalyzer } from '../trading/SignalAggregator.js';
-import { SignalAggregator } from '../trading/SignalAggregator.js';
-import { Strategy, type AnalyzerConfig } from '../entity/Strategy.js';
-import { Analyzer } from '../analyzers/Analyzer.js';
-import { RsiAnalyzer } from '../analyzers/RsiAnalyzer.js';
-import { BollingerAnalyzer } from '../analyzers/BollingerAnalyzer.js';
-import { MaCrossAnalyzer } from '../analyzers/MaCrossAnalyzer.js';
-import { MacdAnalyzer } from '../analyzers/MacdAnalyzer.js';
-import { VolumeAnalyzer } from '../analyzers/VolumeAnalyzer.js';
-import { ProfitTargetAnalyzer } from '../analyzers/ProfitTargetAnalyzer.js';
-import { StopLossAnalyzer } from '../analyzers/StopLossAnalyzer.js';
+import type { BacktestConfig, BacktestDirectConfig, BacktestResult, BacktestTrade, StrategyParams } from './types.js';
+import { TradingCore } from '../trading/TradingCore.js';
+import { Strategy } from '../entity/Strategy.js';
+import type { Candle } from '../candles/types.js';
 import type { ActiveTrade } from '../analyzers/types.js';
 
-const COMMISSION_RATE = new Decimal('0.001'); // 0.1% per trade
+export interface RunCoreOptions {
+  /** When true, omit candles array from result (saves memory for optimization). */
+  lite?: boolean;
+}
 
 export class BacktestEngine {
   #app: App;
+  #core = new TradingCore();
 
   constructor(app: App) {
     this.#app = app;
   }
 
+  /** Run backtest for a DB-stored strategy. */
   async run(config: BacktestConfig): Promise<BacktestResult> {
-    // Load strategy
-    const strategyRepo = this.#app.db.getRepository(Strategy);
-    const strategy = await strategyRepo.findOneByOrFail({ id: config.strategyId });
+    const strategy = await this.#app.db.getRepository(Strategy).findOneByOrFail({ id: config.strategyId });
 
-    // Ensure candles are loaded for the requested range
-    await this.#ensureCandles(strategy.exchange, strategy.pair, config.startDate, config.endDate);
+    await this.ensureCandles(strategy.exchange, strategy.pair, config.startDate, config.endDate);
 
     const candles = await this.#app.tradeManager.candleManager.store.get(
       strategy.exchange, strategy.pair, config.startDate, config.endDate,
@@ -41,118 +33,109 @@ export class BacktestEngine {
       throw new Error(`Not enough candles for backtest (${candles.length}). Need at least 50.`);
     }
 
-    // Setup analyzers (skip those that don't support backtest)
-    const analyzers: (WeightedAnalyzer & { timeframe: Timeframe })[] = [];
-    for (const ac of strategy.analyzers) {
-      const analyzer = this.#createAnalyzer(ac);
-      if (analyzer && analyzer.supportsBacktest) {
-        analyzers.push({ analyzer, weight: ac.weight, timeframe: (ac.timeframe || '5m') as Timeframe });
-      }
+    return this.#runCore(strategy, candles, config.initialBalance);
+  }
+
+  /** Run backtest with a plain strategy object and pre-fetched candles (no DB lookup). */
+  runDirect(config: BacktestDirectConfig, strategy: StrategyParams, candles: Candle[], options?: RunCoreOptions): BacktestResult {
+    if (candles.length < 50) {
+      throw new Error(`Not enough candles for backtest (${candles.length}). Need at least 50.`);
     }
 
-    const signalAggregator = new SignalAggregator();
-    const aggregator = new CandleAggregator();
+    return this.#runCore(strategy, candles, config.initialBalance, options);
+  }
+
+  /** Core backtest loop — single source of truth for both run() and runDirect(). */
+  #runCore(strategy: StrategyParams, candles: Candle[], initialBalance: string, options?: RunCoreOptions): BacktestResult {
+    const analyzers = this.#core.createAnalyzers(this.#app, strategy as Strategy, true);
     const mmConfig = strategy.money_management;
 
-    // Simulation state
-    let balance = new Decimal(config.initialBalance);
+    let balance = new Decimal(initialBalance);
     let peakBalance = balance;
     let maxDrawdown = new Decimal(0);
-    let activeTrade: { entryPrice: Decimal; entryTime: number; quantity: Decimal } | null = null;
+    let activeTrade: { entryPrice: string; entryTime: number; quantity: string; buyAmount: string } | null = null;
     const trades: BacktestTrade[] = [];
     const equityCurve: BacktestResult['equityCurve'] = [];
 
-    const buyThreshold = new Decimal(strategy.buy_threshold);
-    const sellThreshold = new Decimal(strategy.sell_threshold);
-
-    // Walk through candles one by one
-    const lookback = 200;
+    const lookback = this.#core.calculateLookback(analyzers);
+    // Pre-aggregate higher TFs once per backtest — slicing per iteration gives identical results
+    // to per-window aggregation but is ~1000× faster for long backtests.
+    const preAggregated = this.#core.preAggregateForAnalyzers(candles, analyzers);
 
     for (let i = lookback; i < candles.length; i++) {
-      const window = candles.slice(Math.max(0, i - lookback), i + 1);
+      const window = candles.slice(Math.max(0, i - lookback + 1), i + 1);
       const currentCandle = candles[i];
       const currentPrice = currentCandle.c;
 
-      // Build ActiveTrade for analyzers
       const activeTradeForAnalyzer: ActiveTrade | undefined = activeTrade ? {
-        id: 0,
-        entryPrice: activeTrade.entryPrice.toString(),
-        quantity: activeTrade.quantity.toString(),
+        id: 0, entryPrice: activeTrade.entryPrice, quantity: activeTrade.quantity,
       } : undefined;
 
-      // Build candles per analyzer timeframe
-      const analyzersWithCandles: WeightedAnalyzer[] = analyzers.map(a => {
-        if (a.timeframe === '5m') return { ...a, candles: window };
-        return { ...a, candles: aggregator.aggregate(window, a.timeframe) };
-      });
+      // Same evaluate() as PairRunner uses
+      const decision = this.#core.evaluate(
+        analyzers, window, currentPrice, activeTradeForAnalyzer,
+        strategy.buy_threshold, strategy.sell_threshold,
+        preAggregated,
+      );
 
-      // Run signals
-      const result = signalAggregator.aggregate(analyzersWithCandles, window, currentPrice, activeTradeForAnalyzer);
-      const totalBuy = new Decimal(result.totalBuyWeight);
-      const totalSell = new Decimal(result.totalSellWeight);
-
-      // Decision
-      if (!activeTrade && totalBuy.greaterThanOrEqualTo(buyThreshold)) {
-        // BUY
-        let amount: Decimal;
-        if (mmConfig.mode === 'percentage') {
-          amount = balance.times(mmConfig.amount).dividedBy(100);
-        } else {
-          amount = Decimal.min(new Decimal(mmConfig.amount), balance);
-        }
-
-        const commission = amount.times(COMMISSION_RATE);
-        const netAmount = amount.minus(commission);
-        const quantity = netAmount.dividedBy(currentPrice);
-
+      if (decision.action === 'buy' && !activeTrade) {
+        const { quantity, amount } = this.#core.calculatePositionSize(balance.toString(), currentPrice, mmConfig);
+        if (new Decimal(quantity).lessThanOrEqualTo(0)) continue;
         balance = balance.minus(amount);
-        activeTrade = {
-          entryPrice: new Decimal(currentPrice),
-          entryTime: currentCandle.t,
-          quantity,
-        };
-      } else if (activeTrade && totalSell.greaterThanOrEqualTo(sellThreshold)) {
-        // SELL
-        const sellValue = activeTrade.quantity.times(currentPrice);
-        const commission = sellValue.times(COMMISSION_RATE);
-        const netSellValue = sellValue.minus(commission);
-        const totalCommission = activeTrade.entryPrice.times(activeTrade.quantity).times(COMMISSION_RATE).plus(commission);
+        activeTrade = { entryPrice: currentPrice, entryTime: currentCandle.t, quantity, buyAmount: amount };
+      } else if (decision.action === 'sell' && activeTrade) {
+        const { profit, profitPct, totalCommission } = this.#core.calculateProfit(
+          activeTrade.entryPrice, currentPrice, activeTrade.quantity,
+        );
 
-        const profit = new Decimal(currentPrice).minus(activeTrade.entryPrice).times(activeTrade.quantity).minus(totalCommission);
-        const profitPct = new Decimal(currentPrice).minus(activeTrade.entryPrice).dividedBy(activeTrade.entryPrice).times(100);
-
-        balance = balance.plus(netSellValue);
+        // Return: original buy amount + net profit (profit already includes both commissions)
+        balance = balance.plus(activeTrade.buyAmount).plus(profit);
 
         trades.push({
-          entryPrice: activeTrade.entryPrice.toString(),
+          entryPrice: activeTrade.entryPrice,
           exitPrice: currentPrice,
           entryTime: activeTrade.entryTime,
           exitTime: currentCandle.t,
-          quantity: activeTrade.quantity.toDecimalPlaces(8).toString(),
-          profit: profit.toDecimalPlaces(8).toString(),
-          profitPct: profitPct.toDecimalPlaces(4).toString(),
-          commission: totalCommission.toDecimalPlaces(8).toString(),
+          quantity: activeTrade.quantity,
+          profit,
+          profitPct,
+          commission: totalCommission,
         });
-
         activeTrade = null;
       }
 
-      // Track equity
       const equity = activeTrade
-        ? balance.plus(activeTrade.quantity.times(currentPrice))
+        ? balance.plus(new Decimal(activeTrade.quantity).times(currentPrice))
         : balance;
 
       if (equity.greaterThan(peakBalance)) peakBalance = equity;
       const drawdown = peakBalance.isZero() ? new Decimal(0) : peakBalance.minus(equity).dividedBy(peakBalance).times(100);
       if (drawdown.greaterThan(maxDrawdown)) maxDrawdown = drawdown;
 
-      // Record equity curve every 12 candles (1 hour)
       if (i % 12 === 0) {
         equityCurve.push({ time: currentCandle.t, equity: equity.toDecimalPlaces(2).toString() });
       }
     }
 
-    // Calculate totals
+    // If a trade is still open at end of period — treat as if it never happened.
+    // Truncate equity curve to before the trade entry, recompute drawdown.
+    if (activeTrade) {
+      const cutoffTime = activeTrade.entryTime;
+      while (equityCurve.length > 0 && equityCurve[equityCurve.length - 1].time >= cutoffTime) {
+        equityCurve.pop();
+      }
+      let peak = new Decimal(initialBalance);
+      let maxDD = new Decimal(0);
+      for (const e of equityCurve) {
+        const eq = new Decimal(e.equity);
+        if (eq.greaterThan(peak)) peak = eq;
+        const dd = peak.isZero() ? new Decimal(0) : peak.minus(eq).dividedBy(peak).times(100);
+        if (dd.greaterThan(maxDD)) maxDD = dd;
+      }
+      maxDrawdown = maxDD;
+      activeTrade = null;
+    }
+
     let totalProfit = new Decimal(0);
     let wins = 0;
     for (const t of trades) {
@@ -160,25 +143,28 @@ export class BacktestEngine {
       if (new Decimal(t.profit).greaterThan(0)) wins++;
     }
 
-    return {
+    const result: BacktestResult = {
       trades,
       totalProfit: totalProfit.toDecimalPlaces(8).toString(),
       winRate: trades.length > 0 ? (wins / trades.length * 100).toFixed(2) : '0',
       maxDrawdown: maxDrawdown.toDecimalPlaces(2).toString(),
       totalTrades: trades.length,
       equityCurve,
-      candles: candles.map((c) => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c })),
+      candles: [],
     };
+
+    if (!options?.lite) {
+      result.candles = candles.map((c) => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c }));
+    }
+
+    return result;
   }
 
-  /** Streaming version — sends results via callback as they are computed. */
   async runStreaming(config: BacktestConfig, send: (event: any) => void): Promise<void> {
-    const strategyRepo = this.#app.db.getRepository(Strategy);
-    const strategy = await strategyRepo.findOneByOrFail({ id: config.strategyId });
+    const strategy = await this.#app.db.getRepository(Strategy).findOneByOrFail({ id: config.strategyId });
 
-    // Send loading status
     send({ type: 'status', message: 'Loading candles...' });
-    await this.#ensureCandles(strategy.exchange, strategy.pair, config.startDate, config.endDate);
+    await this.ensureCandles(strategy.exchange, strategy.pair, config.startDate, config.endDate);
 
     const candles = await this.#app.tradeManager.candleManager.store.get(
       strategy.exchange, strategy.pair, config.startDate, config.endDate,
@@ -191,114 +177,88 @@ export class BacktestEngine {
 
     send({ type: 'status', message: `Processing ${candles.length} candles...` });
 
-    // Setup analyzers
-    const analyzers: (WeightedAnalyzer & { timeframe: Timeframe })[] = [];
-    for (const ac of strategy.analyzers) {
-      const analyzer = this.#createAnalyzer(ac);
-      if (analyzer && analyzer.supportsBacktest) {
-        analyzers.push({ analyzer, weight: ac.weight, timeframe: (ac.timeframe || '5m') as Timeframe });
-      }
-    }
-
-    const signalAggregator = new SignalAggregator();
-    const aggregator = new CandleAggregator();
+    const analyzers = this.#core.createAnalyzers(this.#app, strategy, true);
     const mmConfig = strategy.money_management;
 
     let balance = new Decimal(config.initialBalance);
     let peakBalance = balance;
     let maxDrawdown = new Decimal(0);
-    let activeTrade: { entryPrice: Decimal; entryTime: number; quantity: Decimal } | null = null;
+    let activeTrade: { entryPrice: string; entryTime: number; quantity: string; buyAmount: string } | null = null;
     const trades: BacktestTrade[] = [];
+    const lookback = this.#core.calculateLookback(analyzers);
+    const preAggregated = this.#core.preAggregateForAnalyzers(candles, analyzers);
 
-    const buyThreshold = new Decimal(strategy.buy_threshold);
-    const sellThreshold = new Decimal(strategy.sell_threshold);
-    const lookback = 200;
-
-    // Send candles in chunks for chart (downsample for display)
-    const candleStep = Math.max(1, Math.floor(candles.length / 2000)); // max 2000 candles for chart
+    // Send downsampled candles for chart
+    const candleStep = Math.max(1, Math.floor(candles.length / 2000));
     const chartCandles: any[] = [];
     for (let i = 0; i < candles.length; i += candleStep) {
       chartCandles.push({ t: candles[i].t, o: candles[i].o, h: candles[i].h, l: candles[i].l, c: candles[i].c });
     }
     send({ type: 'candles', data: chartCandles });
 
-    // Process candles
     let lastEquitySendTime = 0;
+
     for (let i = lookback; i < candles.length; i++) {
-      const window = candles.slice(Math.max(0, i - lookback), i + 1);
+      const window = candles.slice(Math.max(0, i - lookback + 1), i + 1);
       const currentCandle = candles[i];
       const currentPrice = currentCandle.c;
 
       const activeTradeForAnalyzer: ActiveTrade | undefined = activeTrade ? {
-        id: 0,
-        entryPrice: activeTrade.entryPrice.toString(),
-        quantity: activeTrade.quantity.toString(),
+        id: 0, entryPrice: activeTrade.entryPrice, quantity: activeTrade.quantity,
       } : undefined;
 
-      const analyzersWithCandles: WeightedAnalyzer[] = analyzers.map(a => {
-        if (a.timeframe === '5m') return { ...a, candles: window };
-        return { ...a, candles: aggregator.aggregate(window, a.timeframe) };
-      });
+      const decision = this.#core.evaluate(
+        analyzers, window, currentPrice, activeTradeForAnalyzer,
+        strategy.buy_threshold, strategy.sell_threshold,
+        preAggregated,
+      );
 
-      const result = signalAggregator.aggregate(analyzersWithCandles, window, currentPrice, activeTradeForAnalyzer);
-      const totalBuy = new Decimal(result.totalBuyWeight);
-      const totalSell = new Decimal(result.totalSellWeight);
-
-      if (!activeTrade && totalBuy.greaterThanOrEqualTo(buyThreshold)) {
-        let amount: Decimal;
-        if (mmConfig.mode === 'percentage') {
-          amount = balance.times(mmConfig.amount).dividedBy(100);
-        } else {
-          amount = Decimal.min(new Decimal(mmConfig.amount), balance);
-        }
-        const commission = amount.times(COMMISSION_RATE);
-        const netAmount = amount.minus(commission);
+      if (decision.action === 'buy' && !activeTrade) {
+        const { quantity, amount } = this.#core.calculatePositionSize(balance.toString(), currentPrice, mmConfig);
+        if (new Decimal(quantity).lessThanOrEqualTo(0)) continue;
         balance = balance.minus(amount);
-        activeTrade = { entryPrice: new Decimal(currentPrice), entryTime: currentCandle.t, quantity: netAmount.dividedBy(currentPrice) };
-
+        activeTrade = { entryPrice: currentPrice, entryTime: currentCandle.t, quantity, buyAmount: amount };
         send({ type: 'trade', action: 'buy', time: currentCandle.t, price: currentPrice });
-      } else if (activeTrade && totalSell.greaterThanOrEqualTo(sellThreshold)) {
-        const sellValue = activeTrade.quantity.times(currentPrice);
-        const commission = sellValue.times(COMMISSION_RATE);
-        const netSellValue = sellValue.minus(commission);
-        const totalCommission = activeTrade.entryPrice.times(activeTrade.quantity).times(COMMISSION_RATE).plus(commission);
-        const profit = new Decimal(currentPrice).minus(activeTrade.entryPrice).times(activeTrade.quantity).minus(totalCommission);
-        const profitPct = new Decimal(currentPrice).minus(activeTrade.entryPrice).dividedBy(activeTrade.entryPrice).times(100);
-        balance = balance.plus(netSellValue);
+      } else if (decision.action === 'sell' && activeTrade) {
+        const { profit, profitPct, totalCommission } = this.#core.calculateProfit(
+          activeTrade.entryPrice, currentPrice, activeTrade.quantity,
+        );
+
+        balance = balance.plus(activeTrade.buyAmount).plus(profit);
 
         const trade: BacktestTrade = {
-          entryPrice: activeTrade.entryPrice.toString(), exitPrice: currentPrice,
+          entryPrice: activeTrade.entryPrice, exitPrice: currentPrice,
           entryTime: activeTrade.entryTime, exitTime: currentCandle.t,
-          quantity: activeTrade.quantity.toDecimalPlaces(8).toString(),
-          profit: profit.toDecimalPlaces(8).toString(),
-          profitPct: profitPct.toDecimalPlaces(4).toString(),
-          commission: totalCommission.toDecimalPlaces(8).toString(),
+          quantity: activeTrade.quantity, profit, profitPct, commission: totalCommission,
         };
         trades.push(trade);
         activeTrade = null;
 
-        send({ type: 'trade', action: 'sell', time: currentCandle.t, price: currentPrice, profit: trade.profit, profitPct: trade.profitPct });
+        send({ type: 'trade', action: 'sell', time: currentCandle.t, price: currentPrice, profit, profitPct });
       }
 
-      const equity = activeTrade ? balance.plus(activeTrade.quantity.times(currentPrice)) : balance;
+      const equity = activeTrade ? balance.plus(new Decimal(activeTrade.quantity).times(currentPrice)) : balance;
       if (equity.greaterThan(peakBalance)) peakBalance = equity;
       const drawdown = peakBalance.isZero() ? new Decimal(0) : peakBalance.minus(equity).dividedBy(peakBalance).times(100);
       if (drawdown.greaterThan(maxDrawdown)) maxDrawdown = drawdown;
 
-      // Send equity every ~hour of candle data
       if (currentCandle.t - lastEquitySendTime >= 3600000) {
         send({ type: 'equity', time: currentCandle.t, equity: equity.toDecimalPlaces(2).toString() });
         lastEquitySendTime = currentCandle.t;
       }
 
-      // Yield to event loop every 1000 candles to keep WS alive
       if (i % 1000 === 0) {
         send({ type: 'progress', processed: i - lookback, total: candles.length - lookback });
         await new Promise(r => setTimeout(r, 0));
       }
     }
 
-    // Final summary
+    // Open trade at end → treat as if it never happened (no force-close)
+    if (activeTrade) {
+      activeTrade = null;
+      // Note: streaming sends drawdown live, so we don't recompute here
+    }
+
     let totalProfit = new Decimal(0);
     let wins = 0;
     for (const t of trades) {
@@ -316,8 +276,8 @@ export class BacktestEngine {
     });
   }
 
-  /** Fetch missing candles, scanning by day chunks to find and fill gaps. */
-  async #ensureCandles(exchange: string, pair: string, startDate: number, endDate: number): Promise<void> {
+  /** Download missing candles from exchange and store in Redis. Public for use by optimization. */
+  async ensureCandles(exchange: string, pair: string, startDate: number, endDate: number): Promise<void> {
     const store = this.#app.tradeManager.candleManager.store;
     const ex = this.#app.tradeManager.getExchange(exchange);
     if (!ex) throw new Error(`Exchange ${exchange} not found`);
@@ -326,50 +286,76 @@ export class BacktestEngine {
     const DAY = 24 * 60 * 60 * 1000;
     let totalFetched = 0;
 
-    // Scan day by day, check count, fetch if gaps found
+    const startStr = new Date(startDate).toISOString().slice(0, 10);
+    const endStr = new Date(endDate).toISOString().slice(0, 10);
+    this.#app.logger.log(`[Candles] Checking ${pair} ${startStr} → ${endStr}...`);
+
+    // Download range covers [startDate, endDate] inclusive — need endDate + TF as exclusive upper bound
+    const downloadEnd = endDate + TF;
     let dayStart = startDate;
-    while (dayStart < endDate) {
-      const dayEnd = Math.min(dayStart + DAY, endDate);
+    while (dayStart < downloadEnd) {
+      const dayEnd = Math.min(dayStart + DAY, downloadEnd);
       const expected = Math.floor((dayEnd - dayStart) / TF);
       const actual = await store.countRange(exchange, pair, dayStart, dayEnd);
 
       if (actual < expected) {
-        // Gap in this day — fetch entire day from exchange
+        const dayStr = new Date(dayStart).toISOString().slice(0, 10);
+        this.#app.logger.log(`[Candles] Downloading ${pair} ${dayStr} (have ${actual}/${expected})...`);
+
         let currentStart = dayStart;
         while (currentStart < dayEnd) {
           const batch = await ex.fetchCandles(pair, '5m', currentStart, dayEnd, 1000);
           if (batch.length === 0) break;
-
           const toStore = batch.map(c => ({ t: c.openTime, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume }));
           await store.store(exchange, pair, toStore);
           totalFetched += batch.length;
-
           currentStart = batch[batch.length - 1].openTime + TF;
           if (batch.length < 1000) break;
           await new Promise(r => setTimeout(r, 100));
         }
       }
-
       dayStart += DAY;
     }
 
     if (totalFetched > 0) {
-      this.#app.logger.log(`[BacktestEngine] Fetched ${totalFetched} candles for ${pair}`);
+      this.#app.logger.log(`[Candles] Total: ${totalFetched} candles fetched for ${pair} (${startStr} → ${endStr})`);
+    } else {
+      this.#app.logger.log(`[Candles] All candles for ${pair} already in cache`);
     }
-  }
 
-  #createAnalyzer(config: AnalyzerConfig): Analyzer | null {
-    const c = config.config;
-    switch (config.name) {
-      case 'rsi': return new RsiAnalyzer(this.#app, c);
-      case 'bollinger': return new BollingerAnalyzer(this.#app, c);
-      case 'ma_cross': return new MaCrossAnalyzer(this.#app, c);
-      case 'macd': return new MacdAnalyzer(this.#app, c);
-      case 'volume': return new VolumeAnalyzer(this.#app, c);
-      case 'profit_target': return new ProfitTargetAnalyzer(this.#app, c);
-      case 'stop_loss': return new StopLossAnalyzer(this.#app, c);
-      // news analyzer skipped — supportsBacktest = false
-      default: return null;
+    // Verify coverage for requested range
+    const candles = await store.get(exchange, pair, startDate, endDate);
+    const expectedTotal = Math.floor((endDate - startDate) / TF) + 1;
+    const fmtDate = (ts: number) => new Date(ts).toISOString().replace('T', ' ').slice(0, 19);
+
+    if (candles.length === 0) {
+      this.#app.logger.log(`[Candles] WARNING: no candles in range ${startStr} → ${endStr}`);
+      return;
+    }
+
+    this.#app.logger.log(`[Candles] Verification ${pair} ${startStr} → ${endStr}: ${candles.length}/${expectedTotal} candles`);
+    this.#app.logger.log(`[Candles]   actual range: ${fmtDate(candles[0].t)} → ${fmtDate(candles[candles.length - 1].t)}`);
+
+    // Check for gaps
+    let gapCount = 0;
+    let maxGapMs = 0;
+    let maxGapStart = 0;
+
+    for (let i = 1; i < candles.length; i++) {
+      const diff = candles[i].t - candles[i - 1].t;
+      if (diff > TF) {
+        gapCount++;
+        if (diff > maxGapMs) {
+          maxGapMs = diff;
+          maxGapStart = candles[i - 1].t;
+        }
+      }
+    }
+
+    if (gapCount === 0) {
+      this.#app.logger.log(`[Candles]   contiguous — no gaps`);
+    } else {
+      this.#app.logger.log(`[Candles]   WARNING: ${gapCount} gap(s) found, largest: ${(maxGapMs / 60000).toFixed(0)}min at ${fmtDate(maxGapStart)}`);
     }
   }
 }

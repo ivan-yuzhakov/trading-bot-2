@@ -3,21 +3,13 @@ import { Mutex } from 'async-mutex';
 import type { App } from '../app/App.js';
 import type { ExchangeAdapter } from '../exchange/ExchangeAdapter.js';
 import type { CandleManager } from '../candles/CandleManager.js';
-import type { Candle } from '../candles/types.js';
-import type { Timeframe } from '../candles/types.js';
-import { Analyzer } from '../analyzers/Analyzer.js';
-import { RsiAnalyzer } from '../analyzers/RsiAnalyzer.js';
-import { BollingerAnalyzer } from '../analyzers/BollingerAnalyzer.js';
-import { MaCrossAnalyzer } from '../analyzers/MaCrossAnalyzer.js';
-import { MacdAnalyzer } from '../analyzers/MacdAnalyzer.js';
-import { VolumeAnalyzer } from '../analyzers/VolumeAnalyzer.js';
-import { ProfitTargetAnalyzer } from '../analyzers/ProfitTargetAnalyzer.js';
-import { StopLossAnalyzer } from '../analyzers/StopLossAnalyzer.js';
+import type { Candle, Timeframe } from '../candles/types.js';
 import { NewsAnalyzer } from '../analyzers/NewsAnalyzer.js';
-import { SignalAggregator, type WeightedAnalyzer } from './SignalAggregator.js';
+import { TradingCore } from './TradingCore.js';
+import type { WeightedAnalyzer } from './SignalAggregator.js';
 import { MoneyManager } from './MoneyManager.js';
 import type { ActiveTrade } from '../analyzers/types.js';
-import { Strategy, type AnalyzerConfig } from '../entity/Strategy.js';
+import { Strategy } from '../entity/Strategy.js';
 import { Trade } from '../entity/Trade.js';
 import { TradeStep } from '../entity/TradeStep.js';
 
@@ -26,8 +18,8 @@ export class PairRunner {
   #exchange: ExchangeAdapter;
   #candleManager: CandleManager;
   #strategy: Strategy;
+  #core: TradingCore;
   #analyzers: (WeightedAnalyzer & { timeframe: Timeframe })[] = [];
-  #signalAggregator: SignalAggregator;
   #moneyManager: MoneyManager;
   #mutex = new Mutex();
   #activeTrade: ActiveTrade | null = null;
@@ -39,7 +31,7 @@ export class PairRunner {
     this.#exchange = exchange;
     this.#candleManager = candleManager;
     this.#strategy = strategy;
-    this.#signalAggregator = new SignalAggregator();
+    this.#core = new TradingCore();
     this.#moneyManager = moneyManager;
   }
 
@@ -48,17 +40,13 @@ export class PairRunner {
   get running(): boolean { return this.#running; }
 
   async init(): Promise<void> {
-    // Instantiate analyzers from strategy config
-    for (const ac of this.#strategy.analyzers) {
-      const analyzer = this.#createAnalyzer(ac);
-      if (analyzer) {
-        this.#analyzers.push({ analyzer, weight: ac.weight, timeframe: (ac.timeframe || '5m') as Timeframe });
+    this.#analyzers = this.#core.createAnalyzers(this.#app, this.#strategy, false);
 
-        // Start NewsAnalyzer background job
-        if (analyzer instanceof NewsAnalyzer) {
-          this.#newsAnalyzer = analyzer;
-          await analyzer.start(this.#strategy.pair);
-        }
+    // Start NewsAnalyzer background job if present
+    for (const a of this.#analyzers) {
+      if (a.analyzer instanceof NewsAnalyzer) {
+        this.#newsAnalyzer = a.analyzer;
+        await a.analyzer.start(this.#strategy.pair);
       }
     }
 
@@ -83,7 +71,6 @@ export class PairRunner {
   async start(): Promise<void> {
     this.#running = true;
 
-    // Listen for closed candles
     this.#candleManager.on('candle:closed', (event: { exchange: string; pair: string; candle: Candle; tf: Timeframe }) => {
       if (event.exchange === this.#exchange.name && event.pair === this.#strategy.pair) {
         this.#onCandleClosed().catch((e) => {
@@ -97,19 +84,11 @@ export class PairRunner {
 
   async stop(closePosition: boolean = false): Promise<void> {
     this.#running = false;
-
-    if (closePosition && this.#activeTrade) {
-      await this.#closePosition('Manual stop');
-    }
-
-    if (this.#newsAnalyzer) {
-      this.#newsAnalyzer.stop();
-    }
-
+    if (closePosition && this.#activeTrade) await this.#closePosition('Manual stop');
+    if (this.#newsAnalyzer) this.#newsAnalyzer.stop();
     this.#app.logger.log(`[PairRunner] ${this.#strategy.pair}: stopped`);
   }
 
-  /** Handle order fill events from exchange */
   async onOrderFill(orderId: string, status: string, commission?: string, commissionAsset?: string): Promise<void> {
     await this.#mutex.runExclusive(async () => {
       const stepRepo = this.#app.db.getRepository(TradeStep);
@@ -122,29 +101,18 @@ export class PairRunner {
       if (status === 'FILLED') step.filled_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
       await stepRepo.save(step);
 
-      // If sell step filled, close the trade
       if (step.side === 'SELL' && status === 'FILLED') {
         const tradeRepo = this.#app.db.getRepository(Trade);
         const trade = await tradeRepo.findOne({ where: { id: step.trade_id }, relations: ['steps'] });
-        if (trade) {
+        if (trade && trade.entry_price) {
           trade.status = 'closed';
           trade.exit_price = step.price;
           trade.closed_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
 
-          if (trade.entry_price) {
-            // Sum commissions from all steps
-            let totalCommission = new Decimal(0);
-            for (const s of trade.steps || []) {
-              if (s.commission) totalCommission = totalCommission.plus(s.commission);
-            }
-
-            const profit = new Decimal(step.price).minus(trade.entry_price)
-              .times(trade.quantity).minus(totalCommission);
-            const profitPct = new Decimal(step.price).minus(trade.entry_price)
-              .dividedBy(trade.entry_price).times(100);
-            trade.profit = profit.toDecimalPlaces(8).toString();
-            trade.profit_pct = profitPct.toDecimalPlaces(4).toString();
-          }
+          const stepCommissions = (trade.steps || []).map(s => s.commission).filter(Boolean) as string[];
+          const { profit, profitPct } = this.#core.calculateProfit(trade.entry_price, step.price, trade.quantity, stepCommissions);
+          trade.profit = profit;
+          trade.profit_pct = profitPct;
 
           await tradeRepo.save(trade);
           this.#activeTrade = null;
@@ -158,36 +126,22 @@ export class PairRunner {
     if (!this.#running) return;
 
     await this.#mutex.runExclusive(async () => {
-      // Get base candles for current price
-      const baseCandles = await this.#candleManager.getCandles(this.#exchange.name, this.#strategy.pair, '5m', 200);
-      if (baseCandles.length < 50) return;
+      const requiredLookback = this.#core.calculateLookback(this.#analyzers);
+      const baseCandles = await this.#candleManager.getCandles(this.#exchange.name, this.#strategy.pair, '5m', requiredLookback);
+      if (baseCandles.length < requiredLookback / 4) return;
 
       const currentPrice = baseCandles[baseCandles.length - 1].c;
 
-      // Fetch candles per analyzer timeframe
-      const analyzersWithCandles: WeightedAnalyzer[] = [];
-      for (const a of this.#analyzers) {
-        if (a.timeframe === '5m') {
-          analyzersWithCandles.push({ ...a, candles: baseCandles });
-        } else {
-          const tfCandles = await this.#candleManager.getCandles(this.#exchange.name, this.#strategy.pair, a.timeframe, 200);
-          analyzersWithCandles.push({ ...a, candles: tfCandles });
-        }
-      }
+      const decision = this.#core.evaluate(
+        this.#analyzers, baseCandles, currentPrice,
+        this.#activeTrade || undefined,
+        this.#strategy.buy_threshold, this.#strategy.sell_threshold,
+      );
 
-      // Run signal aggregation
-      const result = this.#signalAggregator.aggregate(analyzersWithCandles, baseCandles, currentPrice, this.#activeTrade || undefined);
-
-      const buyThreshold = new Decimal(this.#strategy.buy_threshold);
-      const sellThreshold = new Decimal(this.#strategy.sell_threshold);
-      const totalBuy = new Decimal(result.totalBuyWeight);
-      const totalSell = new Decimal(result.totalSellWeight);
-
-      // Decision
-      if (!this.#activeTrade && totalBuy.greaterThanOrEqualTo(buyThreshold)) {
-        await this.#openPosition(currentPrice, result);
-      } else if (this.#activeTrade && totalSell.greaterThanOrEqualTo(sellThreshold)) {
-        await this.#closePosition(`Sell signal: ${result.totalSellWeight}`);
+      if (decision.action === 'buy') {
+        await this.#openPosition(currentPrice, decision.signal);
+      } else if (decision.action === 'sell') {
+        await this.#closePosition(`Sell signal: ${decision.signal.totalSellWeight}`);
       }
     });
   }
@@ -200,19 +154,16 @@ export class PairRunner {
       return;
     }
 
-    // Get balance
     const balances = await this.#exchange.getBalance();
     const usdtBalance = balances.find((b) => b.asset === 'USDT');
     if (!usdtBalance) return;
 
-    const quantity = this.#moneyManager.calculateQuantity(usdtBalance.free, price, mm);
+    const { quantity } = this.#core.calculatePositionSize(usdtBalance.free, price, mm);
     if (new Decimal(quantity).lessThanOrEqualTo(0)) return;
 
-    // Place buy order
     const order = await this.#exchange.placeOrder(this.#strategy.pair, 'BUY', price, quantity);
     if (!order) return;
 
-    // Save trade + step to DB in a single transaction
     const savedTrade = await this.#app.db.transaction(async (manager) => {
       const trade = manager.create(Trade, {
         strategy_id: this.#strategy.id,
@@ -221,7 +172,7 @@ export class PairRunner {
         status: 'open' as const,
         entry_price: price,
         quantity,
-        stop_loss_price: this.#strategy.stop_loss_pct ? this.#calculateStopLoss(price) : null,
+        stop_loss_price: this.#strategy.stop_loss_pct ? this.#core.calculateStopLoss(price, this.#strategy.stop_loss_pct) : null,
         signal_snapshot: signalResult,
       });
       const saved = await manager.save(Trade, trade);
@@ -235,7 +186,6 @@ export class PairRunner {
         status: order.status === 'FILLED' ? 'filled' as const : 'pending' as const,
       });
       await manager.save(TradeStep, step);
-
       return saved;
     });
 
@@ -246,10 +196,7 @@ export class PairRunner {
       stopLossPrice: savedTrade.stop_loss_price || undefined,
     };
 
-    // Dev mode auto-fill BUY
-    if (order.orderId === '-1') {
-      await this.onOrderFill('-1', 'FILLED');
-    }
+    if (order.orderId === '-1') await this.onOrderFill('-1', 'FILLED');
 
     this.#app.logger.log(`[PairRunner] ${this.#strategy.pair}: opened trade #${savedTrade.id} BUY @ ${price} qty ${quantity}`);
   }
@@ -274,33 +221,8 @@ export class PairRunner {
     });
     await stepRepo.save(step);
 
-    // If dev mode (orderId=-1), simulate fill immediately
-    if (order.orderId === '-1') {
-      await this.onOrderFill('-1', 'FILLED');
-    }
+    if (order.orderId === '-1') await this.onOrderFill('-1', 'FILLED');
 
     this.#app.logger.log(`[PairRunner] ${this.#strategy.pair}: closing trade #${this.#activeTrade.id} SELL @ ${currentPrice}. Reason: ${reason}`);
-  }
-
-  #calculateStopLoss(entryPrice: string): string {
-    const pct = new Decimal(this.#strategy.stop_loss_pct!);
-    return new Decimal(entryPrice).times(new Decimal(1).minus(pct.dividedBy(100))).toDecimalPlaces(8).toString();
-  }
-
-  #createAnalyzer(config: AnalyzerConfig): Analyzer | null {
-    const c = config.config;
-    switch (config.name) {
-      case 'rsi': return new RsiAnalyzer(this.#app, c);
-      case 'bollinger': return new BollingerAnalyzer(this.#app, c);
-      case 'ma_cross': return new MaCrossAnalyzer(this.#app, c);
-      case 'macd': return new MacdAnalyzer(this.#app, c);
-      case 'volume': return new VolumeAnalyzer(this.#app, c);
-      case 'profit_target': return new ProfitTargetAnalyzer(this.#app, c);
-      case 'stop_loss': return new StopLossAnalyzer(this.#app, c);
-      case 'news': return new NewsAnalyzer(this.#app, c);
-      default:
-        this.#app.logger.error(`[PairRunner] Unknown analyzer: ${config.name}`);
-        return null;
-    }
   }
 }

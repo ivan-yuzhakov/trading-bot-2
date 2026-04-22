@@ -8,11 +8,12 @@ import { TF_MS, BASE_TF_MS } from './types.js';
  */
 export class CandleAggregator {
 
-  /** Aggregate base (5m) candles into a higher timeframe. */
+  /** Aggregate base (5m) candles into a higher timeframe. Drops incomplete last group. */
   aggregate(candles: Candle[], targetTf: Timeframe): Candle[] {
     if (targetTf === '5m') return candles;
 
     const tfMs = TF_MS[targetTf];
+    const expectedPerGroup = tfMs / BASE_TF_MS;
     const groups = new Map<number, Candle[]>();
 
     for (const candle of candles) {
@@ -28,9 +29,11 @@ export class CandleAggregator {
     const result: Candle[] = [];
     const sortedKeys = [...groups.keys()].sort((a, b) => a - b);
 
-    for (const key of sortedKeys) {
-      const group = groups.get(key)!;
-      result.push(this.#mergeCandles(key, group));
+    for (let i = 0; i < sortedKeys.length; i++) {
+      const group = groups.get(sortedKeys[i])!;
+      // Drop incomplete groups at boundaries (not enough base candles to form a full period)
+      if (group.length < expectedPerGroup) continue;
+      result.push(this.#mergeCandles(sortedKeys[i], group));
     }
 
     return result;

@@ -53,4 +53,7 @@ export abstract class ExchangeAdapter {
   abstract getPairInfo(pair: string): Promise<ExchangePairInfo | undefined>;
 
   abstract getAvailablePairs(): Promise<ExchangePairInfo[]>;
+
+  /** Graceful shutdown — close all connections. */
+  async shutdown(): Promise<void> {}
 }

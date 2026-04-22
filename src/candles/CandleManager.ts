@@ -5,7 +5,7 @@ import type { ExchangeTrade } from '../exchange/types.js';
 import { CandleStore } from './CandleStore.js';
 import { CandleAggregator } from './CandleAggregator.js';
 import type { Candle, Timeframe, RawTrade } from './types.js';
-import { BASE_TF_MS } from './types.js';
+import { BASE_TF_MS, TF_MS } from './types.js';
 import { CandleSyncState } from '../entity/CandleSyncState.js';
 
 /**
@@ -101,7 +101,7 @@ export class CandleManager extends EventEmitter {
     }
 
     // For higher TFs: get enough 5m candles and aggregate
-    const tfMultiplier = Math.ceil(this.#tfToMs(tf) / BASE_TF_MS);
+    const tfMultiplier = Math.ceil(TF_MS[tf] / BASE_TF_MS);
     const needed = count * tfMultiplier + tfMultiplier; // extra for partial candle
     const baseCandles = await this.store.getLatest(exchange, pair, needed);
     const aggregated = this.#aggregator.aggregate(baseCandles, tf);
@@ -134,6 +134,9 @@ export class CandleManager extends EventEmitter {
       await this.#fillGaps(exchange, pair);
       await this.#updateRecent(exchange, pair);
     }
+
+    // Verify and log coverage
+    await this.#logCandleCoverage(exchange.name, pair);
 
     // Update sync state
     const lastCandle = await this.store.getLast(exchange.name, pair);
@@ -211,7 +214,7 @@ export class CandleManager extends EventEmitter {
     const last = await this.store.getLast(exchange.name, pair);
     if (!first || !last) return;
 
-    const totalExpected = Math.floor((last.t - first.t) / BASE_TF_MS) + 1;
+    const totalExpected = Math.floor((last.t - first.t) / BASE_TF_MS) + 1; // inclusive: from first.t to last.t
     const totalActual = await this.store.count(exchange.name, pair);
 
     if (totalActual >= totalExpected) {
@@ -228,19 +231,23 @@ export class CandleManager extends EventEmitter {
 
     while (scanStart < last.t) {
       const scanEnd = Math.min(scanStart + chunkSize, last.t);
-      const expectedInChunk = Math.floor((scanEnd - scanStart) / BASE_TF_MS) + 1;
+      const expectedInChunk = Math.floor((scanEnd - scanStart) / BASE_TF_MS);
       const actualInChunk = await this.store.countRange(exchange.name, pair, scanStart, scanEnd);
 
       if (actualInChunk < expectedInChunk) {
-        // Gap found in this chunk — fetch from exchange
-        const batch = await exchange.fetchCandles(pair, '5m', scanStart, scanEnd, 1000);
-        if (batch.length > 0) {
+        // Gap found in this chunk — fetch from exchange with pagination
+        let fetchStart = scanStart;
+        while (fetchStart < scanEnd) {
+          const batch = await exchange.fetchCandles(pair, '5m', fetchStart, scanEnd, 1000);
+          if (batch.length === 0) break;
           const candles: Candle[] = batch.map((c) => ({
             t: c.openTime, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume,
           }));
           await this.store.store(exchange.name, pair, candles);
+          if (batch.length < 1000) break;
+          fetchStart = batch[batch.length - 1].openTime + BASE_TF_MS;
+          await new Promise((r) => setTimeout(r, 100));
         }
-        await new Promise((r) => setTimeout(r, 100));
       }
 
       scanStart = scanEnd + BASE_TF_MS;
@@ -253,6 +260,8 @@ export class CandleManager extends EventEmitter {
       ? 7 * 24 * 60 * 60 * 1000
       : 24 * 60 * 60 * 1000;
 
+    // Date.now() is correct here: we need to know "how far forward to fetch from exchange",
+    // not to set candle timestamps (those come from exchange data).
     const now = Date.now();
     const from = now - recentMs;
     let currentStart = from;
@@ -276,6 +285,91 @@ export class CandleManager extends EventEmitter {
     this.#app.logger.log(`[CandleManager] ${pair}: updated ${updated} recent candles`);
   }
 
+  async #logCandleCoverage(exchange: string, pair: string): Promise<void> {
+    const first = await this.store.getFirst(exchange, pair);
+    const last = await this.store.getLast(exchange, pair);
+    if (!first || !last) {
+      this.#app.logger.log(`[CandleManager] ${pair}: no candles stored`);
+      return;
+    }
+
+    const total = await this.store.count(exchange, pair);
+    const expectedTotal = Math.floor((last.t - first.t) / BASE_TF_MS) + 1;
+    const fmtDate = (ts: number) => new Date(ts).toISOString().replace('T', ' ').slice(0, 19);
+
+    this.#app.logger.log(`[CandleManager] ${pair} coverage: ${total} candles, ${fmtDate(first.t)} → ${fmtDate(last.t)}`);
+
+    if (total >= expectedTotal) {
+      const days = ((last.t - first.t) / (24 * 60 * 60 * 1000)).toFixed(1);
+      this.#app.logger.log(`[CandleManager] ${pair}: contiguous period — ${days} days, no gaps`);
+      return;
+    }
+
+    // Find contiguous segments by scanning for gaps
+    const missing = expectedTotal - total;
+    this.#app.logger.log(`[CandleManager] ${pair}: ${missing} candles missing (${(missing / expectedTotal * 100).toFixed(1)}%)`);
+
+    const segments: { from: number; to: number; count: number }[] = [];
+    const chunkSize = 1000 * BASE_TF_MS;
+    let segStart = first.t;
+    let segCount = 0;
+    let scanStart = first.t;
+
+    while (scanStart <= last.t) {
+      const scanEnd = Math.min(scanStart + chunkSize, last.t + BASE_TF_MS);
+      const chunkExpected = Math.floor((scanEnd - scanStart) / BASE_TF_MS);
+      const chunkActual = await this.store.countRange(exchange, pair, scanStart, scanEnd);
+
+      if (chunkActual === chunkExpected) {
+        // Fully contiguous chunk — extend current segment
+        segCount += chunkActual;
+      } else if (chunkActual === 0) {
+        // Entire chunk is empty — close current segment, skip
+        if (segCount > 0) {
+          segments.push({ from: segStart, to: segStart + (segCount - 1) * BASE_TF_MS, count: segCount });
+        }
+        segStart = scanEnd;
+        segCount = 0;
+      } else {
+        // Partial chunk — scan candle by candle to find exact boundaries
+        const candles = await this.store.get(exchange, pair, scanStart, scanEnd - BASE_TF_MS);
+        for (const c of candles) {
+          if (segCount === 0) {
+            segStart = c.t;
+            segCount = 1;
+          } else if (c.t === segStart + segCount * BASE_TF_MS) {
+            segCount++;
+          } else {
+            // Gap found — close current segment, start new one
+            segments.push({ from: segStart, to: segStart + (segCount - 1) * BASE_TF_MS, count: segCount });
+            segStart = c.t;
+            segCount = 1;
+          }
+        }
+      }
+
+      scanStart = scanEnd;
+    }
+
+    // Close last segment
+    if (segCount > 0) {
+      segments.push({ from: segStart, to: segStart + (segCount - 1) * BASE_TF_MS, count: segCount });
+    }
+
+    this.#app.logger.log(`[CandleManager] ${pair}: ${segments.length} contiguous segment(s):`);
+    for (let i = 0; i < segments.length; i++) {
+      const s = segments[i];
+      const days = ((s.to - s.from) / (24 * 60 * 60 * 1000)).toFixed(1);
+      this.#app.logger.log(`[CandleManager]   ${i + 1}) ${fmtDate(s.from)} → ${fmtDate(s.to)} (${s.count} candles, ${days} days)`);
+      if (i < segments.length - 1) {
+        const gapStart = s.to + BASE_TF_MS;
+        const gapEnd = segments[i + 1].from - BASE_TF_MS;
+        const gapCandles = Math.floor((segments[i + 1].from - s.to) / BASE_TF_MS) - 1;
+        this.#app.logger.log(`[CandleManager]      ↕ gap: ${fmtDate(gapStart)} → ${fmtDate(gapEnd)} (${gapCandles} missing)`);
+      }
+    }
+  }
+
   #processTrade(exchange: string, pair: string, trade: RawTrade): void {
     const key = `${exchange}:${pair}`;
     const current = this.#currentCandles.get(key) || null;
@@ -293,16 +387,4 @@ export class CandleManager extends EventEmitter {
     }
   }
 
-  #tfToMs(tf: Timeframe): number {
-    const map: Record<Timeframe, number> = {
-      '5m': 5 * 60 * 1000,
-      '15m': 15 * 60 * 1000,
-      '30m': 30 * 60 * 1000,
-      '1h': 60 * 60 * 1000,
-      '2h': 2 * 60 * 60 * 1000,
-      '4h': 4 * 60 * 60 * 1000,
-      '1d': 24 * 60 * 60 * 1000,
-    };
-    return map[tf];
-  }
 }

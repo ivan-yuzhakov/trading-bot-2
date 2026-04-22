@@ -1,0 +1,66 @@
+{
+  "name": "Iter5: 2h entries + TrendFilter 4h",
+  "backtest": {
+    "startDate": "2026-01-01",
+    "endDate": "2026-03-31",
+    "initialBalance": "10000"
+  },
+  "strategy": {
+    "pair": "ETHUSDT",
+    "exchange": "binance",
+    "analyzers": [
+      {
+        "name": "rsi",
+        "timeframe": "2h",
+        "weight": "1.5",
+        "config": {
+          "period": 14,
+          "oversold": 25,
+          "overbought": 95
+        }
+      },
+      {
+        "name": "bollinger",
+        "timeframe": "2h",
+        "weight": "1.5",
+        "config": {
+          "period": 20,
+          "stdDev": 2
+        }
+      },
+      {
+        "name": "trend_filter",
+        "timeframe": "4h",
+        "weight": "1.0",
+        "config": {
+          "period": { "from": 30, "to": 60, "step": 30 },
+          "maxGapPct": 10
+        }
+      },
+      {
+        "name": "profit_target",
+        "weight": "5.0",
+        "config": {
+          "targetPct": { "from": 3, "to": 6, "step": 1 }
+        }
+      },
+      {
+        "name": "stop_loss",
+        "weight": "5.0",
+        "config": {
+          "lossPct": { "from": 1.5, "to": 2.5, "step": 0.5 }
+        }
+      }
+    ],
+    "buy_threshold": { "from": 1.0, "to": 2.0, "step": 0.5 },
+    "sell_threshold": "0.5",
+    "stop_loss_pct": null,
+    "money_management": {
+      "mode": "percentage",
+      "amount": "95",
+      "maxConcurrentTrades": 1,
+      "maxExposurePerPair": "10000",
+      "dailyLossLimit": "0"
+    }
+  }
+}

@@ -558,4 +558,32 @@ export class BinanceAdapter extends ExchangeAdapter {
       }
     }
   }
+
+  async shutdown(): Promise<void> {
+    // Stop reconnect attempts
+    if (this.#reconnectTimeout) {
+      clearTimeout(this.#reconnectTimeout);
+      this.#reconnectTimeout = null;
+    }
+
+    // Stop heartbeat
+    if (this.#heartbeatInterval) {
+      clearInterval(this.#heartbeatInterval);
+      this.#heartbeatInterval = null;
+    }
+
+    // Close all trade streams
+    for (const [, ws] of this.#tradeStreams) {
+      ws.removeAllListeners();
+      ws.terminate();
+    }
+    this.#tradeStreams.clear();
+
+    // Close main WS — terminate() kills the socket immediately
+    if (this.#ws) {
+      this.#ws.removeAllListeners();
+      this.#ws.terminate();
+      this.#ws = null;
+    }
+  }
 }

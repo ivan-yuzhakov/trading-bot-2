@@ -102,3 +102,27 @@ body { font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; backgr
 .mt-10 { margin-top: 10px; }
 .muted { color: #333; font-size: 13px; }
 .strategy-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.ml-5 { margin-left: 5px; }
+.mr-5 { margin-right: 5px; }
+.ml-10 { margin-left: 10px; }
+
+/* Clickable card */
+.clickable { cursor: pointer; transition: border-color 0.15s; }
+.clickable:hover { border-color: #333; }
+
+/* Sortable table header */
+.sortable { cursor: pointer; user-select: none; }
+.sortable:hover { color: #e8b820; }
+
+/* Params cell */
+.params-cell { max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: #666; }
+
+/* Modal */
+.modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; display: flex; align-items: flex-start; justify-content: center; padding-top: 5vh; overflow-y: auto; }
+.modal { background: #111; border: 1px solid #222; width: 90%; max-width: 1000px; max-height: 90vh; overflow-y: auto; }
+.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #1a1a1a; }
+.modal-header h3 { color: #e8b820; font-size: 14px; }
+.modal-body { padding: 20px; }
+.modal-body h4 { color: #888; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin: 16px 0 8px; }
+.modal-body h4:first-child { margin-top: 0; }
+.code-block { background: #0a0a0a; border: 1px solid #1a1a1a; padding: 12px; font-size: 11px; color: #888; overflow-x: auto; max-height: 300px; overflow-y: auto; white-space: pre; }

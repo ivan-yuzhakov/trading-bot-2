@@ -1,7 +1,4 @@
 import 'reflect-metadata';
-import dotenv from 'dotenv';
-dotenv.config();
-
 import express from 'express';
 import session from 'express-session';
 import MySQLStoreFactory from 'express-mysql-session';
@@ -73,7 +70,7 @@ server.post('/auth', (req: any, res) => {
   return res.json({ status: true });
 });
 
-server.all('/{*path}', (_req, res) => {
+server.use((_req, res) => {
   res.redirect('/');
 });
 

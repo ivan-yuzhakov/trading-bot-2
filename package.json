@@ -6,18 +6,23 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch --watch-path=src --watch-path=views src/index.ts",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "optimize": "tsx src/optimization/run.ts",
+    "candles": "tsx src/candles/download.ts",
+    "analyze": "tsx src/optimization/analyze.ts"
   },
   "dependencies": {
     "async-mutex": "^0.5",
-    "axios": "^1.12",
+    "axios": "^1.15.0",
     "decimal.js": "^10.6",
-    "dotenv": "^17.4.0",
+    "dotenv": "^17.4.1",
     "express": "^5.1",
-    "express-session": "^1.18",
     "express-mysql-session": "^3.0",
+    "express-session": "^1.18",
     "ioredis": "^5.6",
-    "mysql2": "^3.15",
+    "mysql2": "^3.22.0",
     "reflect-metadata": "^0.2",
     "twig": "^3.0.0",
     "typeorm": "^0.3",
@@ -30,6 +35,7 @@
     "@types/twig": "^1.12",
     "@types/ws": "^8.18",
     "tsx": "^4.19",
-    "typescript": "^6.0.2"
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.4"
   }
 }

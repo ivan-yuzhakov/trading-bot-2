@@ -17,7 +17,7 @@ export class CandleStore {
     return `candles:5min:${exchange}:${pair}`;
   }
 
-  /** Store candles (ZADD with score = openTime). Deduplicates by overwriting same score. */
+  /** Store candles (ZADD with score = openTime). Removes old entries at same score first to prevent duplicates. */
   async store(exchange: string, pair: string, candles: Candle[]): Promise<void> {
     if (candles.length === 0) return;
 
@@ -27,6 +27,10 @@ export class CandleStore {
     // Batch in chunks of 500 to avoid huge commands
     for (let i = 0; i < candles.length; i += 500) {
       const chunk = candles.slice(i, i + 500);
+      // Remove old entries at these scores first (prevents duplicate members with same score)
+      for (const candle of chunk) {
+        pipeline.zremrangebyscore(key, candle.t, candle.t);
+      }
       const args: (string | number)[] = [];
       for (const candle of chunk) {
         args.push(candle.t, JSON.stringify(candle));
@@ -70,10 +74,10 @@ export class CandleStore {
     return this.#app.redis.client.zcard(key);
   }
 
-  /** Count candles in a time range. */
+  /** Count candles in a time range [from, to). Right boundary exclusive to prevent double-counting. */
   async countRange(exchange: string, pair: string, from: number, to: number): Promise<number> {
     const key = this.#key(exchange, pair);
-    return this.#app.redis.client.zcount(key, from, to);
+    return this.#app.redis.client.zcount(key, from, `(${to}`);
   }
 
   /** Remove candles older than maxAgeMs. */

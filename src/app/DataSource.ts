@@ -5,6 +5,7 @@ import { Trade } from '../entity/Trade.js';
 import { TradeStep } from '../entity/TradeStep.js';
 import { CandleSyncState } from '../entity/CandleSyncState.js';
 import { Log } from '../entity/Log.js';
+import { OptimizationResult } from '../entity/OptimizationResult.js';
 
 export function createDataSource(config: Config): DataSource {
   return new DataSource({
@@ -14,9 +15,9 @@ export function createDataSource(config: Config): DataSource {
     username: config.db.username,
     password: config.db.password,
     database: config.db.database,
-    synchronize: config.mode === 'dev',
+    synchronize: false,
     logging: false,
-    entities: [Strategy, Trade, TradeStep, CandleSyncState, Log],
+    entities: [Strategy, Trade, TradeStep, CandleSyncState, Log, OptimizationResult],
     dateStrings: true,
   });
 }

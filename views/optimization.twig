@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Optimization Results</title>
+  <link rel="stylesheet" href="/public/css/common.css?v={{ version }}">
+  <script src="/public/js/i18n.js?v={{ version }}"></script>
+  <script src="/public/js/optimization.js?v={{ version }}"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+</head>
+<body>
+<div id="app" class="admin-container" x-data="optimizationPage" x-init="init()">
+
+  <header class="header">
+    <h1>Trading Bot</h1>
+    <nav class="nav">
+      <a href="/" class="nav-link" x-text="t('dashboard')"></a>
+      <a href="/backtest" class="nav-link" x-text="t('backtest')"></a>
+      <a href="/optimization" class="nav-link active" x-text="t('optimization')"></a>
+      <button class="btn btn-sm lang-toggle" @click="toggleLang()" x-text="lang === 'en' ? 'RU' : 'EN'"></button>
+    </nav>
+  </header>
+
+  <!-- Runs list -->
+  <section class="section">
+    <h2 x-text="t('optRuns')"></h2>
+    <div x-show="runs.length === 0" class="muted" x-text="t('optNoRuns')"></div>
+    <div class="cards">
+      <template x-for="run in runs" :key="run.run_id">
+        <div class="card clickable" @click="selectRun(run.run_id)" :class="{'card-active': selectedRunId === run.run_id}">
+          <div class="card-title" x-text="run.run_name"></div>
+          <div class="card-row"><span x-text="t('pair') + ':'"></span><span x-text="run.pair + ' (' + run.exchange + ')'"></span></div>
+          <div class="card-row"><span x-text="t('optVariants') + ':'"></span><span x-text="run.total_variants"></span></div>
+          <div class="card-row"><span x-text="t('optBestProfit') + ':'"></span><span :class="parseFloat(run.best_profit_pct) >= 0 ? 'status-ok' : 'status-err'" x-text="run.best_profit_pct + '%'"></span></div>
+          <div class="card-row"><span x-text="t('optAvgProfit') + ':'"></span><span x-text="run.avg_profit_pct + '%'"></span></div>
+          <div class="card-row"><span x-text="t('date') + ':'"></span><span x-text="run.created_at"></span></div>
+        </div>
+      </template>
+    </div>
+  </section>
+
+  <!-- Results table -->
+  <section class="section" x-show="selectedRunId">
+    <h2 x-text="t('optResults')"></h2>
+
+    <!-- Filters -->
+    <div class="form-row mb-5">
+      <label x-text="t('optMinProfit') + ':'"></label>
+      <input type="text" x-model="filterMinProfit" placeholder="0" style="width:80px" @input="loadResults()">
+      <label class="ml-10" x-text="t('optMinWinRate') + ':'"></label>
+      <input type="text" x-model="filterMinWinRate" placeholder="0" style="width:80px" @input="loadResults()">
+      <label class="ml-10" x-text="t('optMinTrades') + ':'"></label>
+      <input type="number" x-model="filterMinTrades" placeholder="0" style="width:80px" @input="loadResults()">
+    </div>
+
+    <div x-show="loadingResults" class="muted">Loading...</div>
+    <table class="table" x-show="results.length > 0 && !loadingResults">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th class="sortable" @click="sortBy('total_profit_pct')" x-text="t('profitPct')"></th>
+          <th class="sortable" @click="sortBy('total_profit')" x-text="t('totalProfit')"></th>
+          <th class="sortable" @click="sortBy('final_balance')" x-text="t('optFinalBalance')"></th>
+          <th class="sortable" @click="sortBy('win_rate')" x-text="t('winRate')"></th>
+          <th class="sortable" @click="sortBy('max_drawdown')" x-text="t('maxDrawdown')"></th>
+          <th class="sortable" @click="sortBy('total_trades')" x-text="t('totalTrades')"></th>
+          <th class="sortable" @click="sortBy('profit_factor')" x-text="t('optProfitFactor')"></th>
+          <th class="sortable" @click="sortBy('avg_profit_per_trade')" x-text="t('optAvgPerTrade')"></th>
+          <th x-text="t('optParams')"></th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="r in results" :key="r.id">
+          <tr :class="{'row-profit': parseFloat(r.total_profit) > 0, 'row-loss': parseFloat(r.total_profit) < 0}">
+            <td x-text="r.variant_index"></td>
+            <td x-text="r.total_profit_pct + '%'"></td>
+            <td x-text="r.total_profit"></td>
+            <td x-text="r.final_balance"></td>
+            <td x-text="r.win_rate + '%'"></td>
+            <td x-text="r.max_drawdown + '%'"></td>
+            <td x-text="r.total_trades"></td>
+            <td x-text="r.profit_factor"></td>
+            <td x-text="r.avg_profit_per_trade"></td>
+            <td class="params-cell" x-text="formatParams(r.params)"></td>
+            <td>
+              <button class="btn btn-sm" @click="showDetails(r.id)" x-text="t('optDetails')"></button>
+              <button class="btn btn-sm btn-primary" @click="applyAsStrategy(r.id)" x-text="t('optApply')"></button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+
+    <!-- Pagination -->
+    <div class="form-row mt-5" x-show="totalResults > pageSize">
+      <button class="btn btn-sm" @click="prevPage()" :disabled="page === 0">&laquo;</button>
+      <span class="ml-5 mr-5" x-text="(page + 1) + ' / ' + Math.ceil(totalResults / pageSize)"></span>
+      <button class="btn btn-sm" @click="nextPage()" :disabled="(page + 1) * pageSize >= totalResults">&raquo;</button>
+    </div>
+
+    <p x-show="results.length === 0 && !loadingResults" class="muted" x-text="t('optNoResults')"></p>
+  </section>
+
+  <!-- Detail modal -->
+  <div class="modal-overlay" x-show="detailData" @click.self="detailData = null" x-cloak>
+    <div class="modal">
+      <div class="modal-header">
+        <h3 x-text="t('optDetails') + ' #' + (detailData?.variant_index ?? '')"></h3>
+        <button class="btn btn-sm" @click="detailData = null">X</button>
+      </div>
+      <div class="modal-body" x-show="detailData">
+        <h4 x-text="t('optStrategyConfig')"></h4>
+        <pre class="code-block" x-text="JSON.stringify(detailData?.strategy, null, 2)"></pre>
+
+        <h4 x-text="t('optTradeList')"></h4>
+        <table class="table" x-show="detailData?.trades?.length > 0">
+          <thead>
+            <tr>
+              <th>#</th><th x-text="t('entry')"></th><th x-text="t('exit')"></th>
+              <th x-text="t('qty')"></th><th x-text="t('profit')"></th><th x-text="t('profitPct')"></th>
+              <th x-text="t('optCommission')"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="(tr, i) in (detailData?.trades || [])" :key="i">
+              <tr :class="{'row-profit': parseFloat(tr.profit) > 0, 'row-loss': parseFloat(tr.profit) < 0}">
+                <td x-text="i + 1"></td>
+                <td x-text="tr.entryPrice"></td>
+                <td x-text="tr.exitPrice"></td>
+                <td x-text="tr.quantity"></td>
+                <td x-text="tr.profit"></td>
+                <td x-text="tr.profitPct + '%'"></td>
+                <td x-text="tr.commission"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

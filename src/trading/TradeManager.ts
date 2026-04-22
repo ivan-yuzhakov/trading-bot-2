@@ -110,9 +110,15 @@ export class TradeManager {
   /** Graceful shutdown */
   async shutdown(): Promise<void> {
     this.#app.logger.log('[TradeManager] Shutting down...');
-    for (const [id, runner] of this.#runners) {
+    for (const [, runner] of this.#runners) {
       await runner.stop(false);
     }
     this.#runners.clear();
+
+    // Close exchange connections (WebSockets, etc.)
+    for (const [, exchange] of this.#exchanges) {
+      await exchange.shutdown();
+    }
+    this.#exchanges.clear();
   }
 }

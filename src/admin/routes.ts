@@ -4,6 +4,8 @@ import { authRequired, authJson } from './middleware.js';
 import { Strategy } from '../entity/Strategy.js';
 import { Trade } from '../entity/Trade.js';
 import { BacktestEngine } from '../backtesting/BacktestEngine.js';
+import { OptimizationResult } from '../entity/OptimizationResult.js';
+import { readFile } from 'node:fs/promises';
 
 export function registerAdminRoutes(server: Express, app: App): void {
   const router = server;
@@ -233,6 +235,119 @@ export function registerAdminRoutes(server: Express, app: App): void {
         });
       }
       res.json(result);
+    } catch (e: any) {
+      res.json({ error: e.message });
+    }
+  });
+
+  // ==================== Pages: Optimization ====================
+
+  router.get('/optimization', authRequired, (_req, res) => {
+    res.render('optimization.twig', { auth: true });
+  });
+
+  // ==================== API: Optimization ====================
+
+  router.get('/api/optimization/runs', authJson, async (_req, res) => {
+    try {
+      const repo = app.db.getRepository(OptimizationResult);
+      const runs = await repo.query(`
+        SELECT run_id, run_name, pair, exchange, total_variants,
+               MAX(total_profit_pct) as best_profit_pct,
+               ROUND(AVG(total_profit_pct), 4) as avg_profit_pct,
+               MIN(created_at) as created_at
+        FROM optimization_results
+        WHERE status = 'completed'
+        GROUP BY run_id, run_name, pair, exchange, total_variants
+        ORDER BY created_at DESC
+      `);
+      res.json(runs);
+    } catch (e: any) {
+      res.json({ error: e.message });
+    }
+  });
+
+  router.get('/api/optimization/results', authJson, async (req: any, res) => {
+    try {
+      const repo = app.db.getRepository(OptimizationResult);
+      const runId = req.query.run_id;
+      if (!runId) { res.json({ error: 'run_id required' }); return; }
+
+      const sort = req.query.sort || 'total_profit_pct';
+      const order = (req.query.order || 'desc').toUpperCase();
+      const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+      const offset = parseInt(req.query.offset) || 0;
+
+      const allowedSorts = ['total_profit', 'total_profit_pct', 'final_balance', 'win_rate', 'max_drawdown', 'total_trades', 'profit_factor', 'avg_profit_per_trade', 'variant_index'];
+      const sortField = allowedSorts.includes(sort) ? sort : 'total_profit_pct';
+      const sortOrder = order === 'ASC' ? 'ASC' : 'DESC';
+
+      const qb = repo.createQueryBuilder('r')
+        .where('r.run_id = :runId', { runId })
+        .andWhere('r.status = :status', { status: 'completed' });
+
+      if (req.query.min_profit) {
+        qb.andWhere('r.total_profit_pct >= :minProfit', { minProfit: parseFloat(req.query.min_profit) });
+      }
+      if (req.query.min_win_rate) {
+        qb.andWhere('r.win_rate >= :minWinRate', { minWinRate: parseFloat(req.query.min_win_rate) });
+      }
+      if (req.query.min_trades) {
+        qb.andWhere('r.total_trades >= :minTrades', { minTrades: parseInt(req.query.min_trades) });
+      }
+
+      const total = await qb.getCount();
+      const results = await qb
+        .orderBy(`r.${sortField}`, sortOrder as 'ASC' | 'DESC')
+        .skip(offset)
+        .take(limit)
+        .getMany();
+
+      res.json({ results, total });
+    } catch (e: any) {
+      res.json({ error: e.message });
+    }
+  });
+
+  router.get('/api/optimization/results/:id/details', authJson, async (req: any, res) => {
+    try {
+      const repo = app.db.getRepository(OptimizationResult);
+      const result = await repo.findOneByOrFail({ id: +req.params.id });
+
+      if (!result.detail_file) {
+        res.json({ error: 'No detail file' });
+        return;
+      }
+
+      const content = await readFile(result.detail_file, 'utf-8');
+      const detail = JSON.parse(content);
+      detail.variant_index = result.variant_index;
+      res.json(detail);
+    } catch (e: any) {
+      res.json({ error: e.message });
+    }
+  });
+
+  router.post('/api/optimization/results/:id/apply', authJson, async (req: any, res) => {
+    try {
+      const optRepo = app.db.getRepository(OptimizationResult);
+      const result = await optRepo.findOneByOrFail({ id: +req.params.id });
+
+      const snapshot = result.strategy_snapshot as any;
+      const stratRepo = app.db.getRepository(Strategy);
+      const strategy = stratRepo.create({
+        pair: snapshot.pair,
+        exchange: snapshot.exchange,
+        analyzers: snapshot.analyzers,
+        buy_threshold: String(snapshot.buy_threshold),
+        sell_threshold: String(snapshot.sell_threshold),
+        stop_loss_pct: snapshot.stop_loss_pct != null ? String(snapshot.stop_loss_pct) : null,
+        money_management: snapshot.money_management,
+        active: 0,
+      });
+
+      await stratRepo.save(strategy);
+      res.json({ status: true, strategy });
     } catch (e: any) {
       res.json({ error: e.message });
     }

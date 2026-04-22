@@ -1,0 +1,67 @@
+{
+  "name": "CHAMPION: RSI+BB+TrendFilter (best of 11 iter)",
+  "_comment": "Best config found across 11 iterations: +7.81% profit, 6 trades, 50% win, DD 8.7%, PF 1.85",
+  "backtest": {
+    "startDate": "2026-01-01",
+    "endDate": "2026-03-31",
+    "initialBalance": "10000"
+  },
+  "strategy": {
+    "pair": "ETHUSDT",
+    "exchange": "binance",
+    "analyzers": [
+      {
+        "name": "rsi",
+        "timeframe": "4h",
+        "weight": "1.5",
+        "config": {
+          "period": 14,
+          "oversold": 25,
+          "overbought": 95
+        }
+      },
+      {
+        "name": "bollinger",
+        "timeframe": "4h",
+        "weight": "1.5",
+        "config": {
+          "period": 20,
+          "stdDev": 2.5
+        }
+      },
+      {
+        "name": "trend_filter",
+        "timeframe": "4h",
+        "weight": "1.0",
+        "config": {
+          "period": 50,
+          "maxGapPct": 10
+        }
+      },
+      {
+        "name": "profit_target",
+        "weight": "5.0",
+        "config": {
+          "targetPct": 6
+        }
+      },
+      {
+        "name": "stop_loss",
+        "weight": "5.0",
+        "config": {
+          "lossPct": 2
+        }
+      }
+    ],
+    "buy_threshold": "1.5",
+    "sell_threshold": "0.5",
+    "stop_loss_pct": null,
+    "money_management": {
+      "mode": "percentage",
+      "amount": "95",
+      "maxConcurrentTrades": 1,
+      "maxExposurePerPair": "10000",
+      "dailyLossLimit": "0"
+    }
+  }
+}

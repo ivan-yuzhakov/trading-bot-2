@@ -1,4 +1,7 @@
+import dotenv from 'dotenv';
 import crypto from 'crypto';
+
+dotenv.config();
 
 export class Config {
   mode: 'dev' | 'prod';

@@ -4,6 +4,8 @@ import { Log } from '../entity/Log.js';
 export class Logger {
   #app: App;
   #running: number;
+  #closed = false;
+  #pending: Set<Promise<void>> = new Set();
 
   constructor(app: App) {
     this.#app = app;
@@ -20,12 +22,25 @@ export class Logger {
 
   log(text: string, send: boolean = false): void {
     console.log(text);
-    this.#write('info', text, send);
+    this.#enqueue('info', text, send);
   }
 
   error(text: string): void {
     console.error(text);
-    this.#write('error', text, true);
+    this.#enqueue('error', text, true);
+  }
+
+  /** Wait for all pending writes then stop accepting new ones. */
+  async close(): Promise<void> {
+    this.#closed = true;
+    await Promise.allSettled(this.#pending);
+  }
+
+  #enqueue(level: string, description: string, send: boolean): void {
+    if (this.#closed) return;
+    const p = this.#write(level, description, send);
+    this.#pending.add(p);
+    p.finally(() => this.#pending.delete(p));
   }
 
   async #write(level: string, description: string, send: boolean): Promise<void> {
